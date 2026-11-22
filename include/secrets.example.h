@@ -1,4 +1,4 @@
-// Copia este archivo como "secrets.h" y pon tus datos reales.
+
 // secrets.h está en .gitignore para no publicar la contraseña.
 #pragma once
 
