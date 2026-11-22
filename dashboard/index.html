@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cava de Fermentación</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap">
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+/* Layout: cabecera con estado global, fila de 4 sensores, 2 gráficas históricas, bitácora de eventos. Tema "cava": oscuro de malta tostada con ámbar de cerveza. */
+:root {
+  --bg: #120e0a;
+  --panel: #1c1611;
+  --panel-2: #241c15;
+  --line: #3a2e23;
+  --fg: #f3e9dc;
+  --muted: #a8968a;
+  --amber: #f2a33a;
+  --amber-soft: rgba(242,163,58,.16);
+  --ok: #8fbf5a;
+  --warn: #f2c94c;
+  --crit: #e5534b;
+  --info: #6cb4d9;
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "Inter", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", Consolas, ui-monospace, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background:
+    radial-gradient(1200px 500px at 85% -10%, rgba(242,163,58,.10), transparent 60%),
+    var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 var(--f-body);
+  min-height: 100vh;
+}
+.wrap {
+  max-width: 1280px; margin: 0 auto;
+  padding-block: 28px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 20px;
+}
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.label { font: 600 11px/1 var(--f-body); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+
+/* Cabecera */
+header { display: flex; flex-wrap: wrap; gap: 16px 24px; align-items: end; justify-content: space-between; }
+.brand h1 {
+  font: 800 clamp(30px, 5vw, 52px)/0.95 var(--f-display);
+  letter-spacing: -.02em; margin: 6px 0 0; text-wrap: balance;
+}
+.brand h1 span { color: var(--amber); }
+.conn { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 12px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel); font: 600 12px/1 var(--f-body); color: var(--muted);
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill[data-s="on"] .dot { background: var(--ok); box-shadow: 0 0 0 4px rgba(143,191,90,.18); }
+.pill[data-s="on"] { color: var(--fg); }
+.pill[data-s="demo"] .dot { background: var(--amber); }
+.pill[data-s="demo"] { color: var(--amber); border-color: rgba(242,163,58,.4); }
+.pill[data-s="off"] .dot { background: var(--crit); }
+button, input {
+  font: inherit; color: var(--fg); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px;
+}
+button { cursor: pointer; font-weight: 600; font-size: 13px; }
+button:hover { border-color: var(--amber); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+/* Banner de estado */
+.status {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center;
+  padding: 18px 22px; border-radius: 14px; background: var(--panel);
+  border: 1px solid var(--line); border-left: 6px solid var(--s-color, var(--muted));
+}
+.status .big { font: 800 clamp(20px, 3.2vw, 30px)/1.1 var(--f-display); letter-spacing: -.01em; color: var(--s-color, var(--fg)); }
+.status .why { color: var(--muted); font-size: 14px; }
+.status .meta { text-align: right; }
+.bubbles { width: 46px; height: 46px; }
+.action {
+  margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline;
+  padding: 8px 12px; border-radius: 8px; background: var(--panel-2); font-weight: 500;
+}
+.action .label { color: var(--s-color, var(--muted)); }
+@media (max-width: 640px) {
+  .status { grid-template-columns: 1fr; }
+  .status .meta { text-align: left; }
+  .bubbles { display: none; }
+}
+
+/* Tarjetas de sensores */
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 1060px) { .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .grid4 { grid-template-columns: 1fr; } }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  padding: 18px; display: grid; gap: 12px; align-content: start; min-width: 0;
+}
+.card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.chip {
+  font: 600 10.5px/1 var(--f-body); letter-spacing: .06em; text-transform: uppercase;
+  padding: 5px 8px; border-radius: 6px; background: var(--panel-2); color: var(--muted);
+  white-space: nowrap;
+}
+.chip[data-k="ok"] { background: rgba(143,191,90,.14); color: var(--ok); }
+.chip[data-k="warn"] { background: rgba(242,201,76,.14); color: var(--warn); }
+.chip[data-k="crit"] { background: rgba(229,83,75,.16); color: var(--crit); }
+.chip[data-k="info"] { background: rgba(108,180,217,.14); color: var(--info); }
+.gauge { width: 100%; max-width: 240px; justify-self: center; display: block; }
+.gauge text { font-family: var(--f-mono); }
+.value { font: 700 40px/1 var(--f-display); letter-spacing: -.02em; text-align: center; }
+.value small { font: 500 16px var(--f-body); color: var(--muted); margin-left: 3px; }
+.sub { display: flex; justify-content: space-between; color: var(--muted); font-size: 12.5px; gap: 8px; }
+
+/* PIR */
+.pir-viz { display: grid; place-items: center; height: 120px; position: relative; }
+.pir-core { width: 28px; height: 28px; border-radius: 50%; background: var(--panel-2); border: 2px solid var(--line); z-index: 1; transition: background .3s; }
+.pir-ring { position: absolute; width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--amber); opacity: 0; }
+.pir-viz[data-a="1"] .pir-core { background: var(--amber); border-color: var(--amber); }
+.pir-viz[data-a="1"] .pir-ring { animation: ripple 2s ease-out infinite; }
+.pir-viz[data-a="1"] .pir-ring:nth-child(2) { animation-delay: .66s; }
+.pir-viz[data-a="1"] .pir-ring:nth-child(3) { animation-delay: 1.33s; }
+@keyframes ripple { from { transform: scale(1); opacity: .8; } to { transform: scale(4.2); opacity: 0; } }
+
+/* MQ bar */
+.mqbar { position: relative; height: 120px; display: grid; align-content: center; gap: 10px; }
+.track { position: relative; height: 14px; border-radius: 7px; background: var(--panel-2); overflow: hidden; }
+.track .band { position: absolute; top: 0; bottom: 0; background: rgba(143,191,90,.18); }
+.track .zero { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--muted); left: 50%; }
+.track .needle { position: absolute; top: 0; bottom: 0; width: 6px; margin-left: -3px; border-radius: 3px; background: var(--amber); transition: left .6s cubic-bezier(.2,.8,.2,1); left: 50%; }
+.ticks { display: flex; justify-content: space-between; font: 11px var(--f-mono); color: var(--muted); }
+
+/* Gráficas */
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+.chart { width: 100%; height: 220px; display: block; }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+
+/* Bitácora + config */
+.bottom { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 900px) { .bottom { grid-template-columns: 1fr; } }
+.log { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow: auto; display: grid; gap: 2px; }
+.log li { display: grid; grid-template-columns: 74px 1fr; gap: 12px; padding: 8px 10px; border-radius: 8px; font-size: 13.5px; }
+.log li:nth-child(odd) { background: var(--panel-2); }
+.log time { font: 12px var(--f-mono); color: var(--muted); padding-top: 2px; }
+.log .empty { color: var(--muted); grid-template-columns: 1fr; }
+form.cfg { display: grid; gap: 10px; }
+form.cfg label { display: grid; gap: 6px; }
+form.cfg input { width: 100%; font-family: var(--f-mono); font-size: 13px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+.raw { font: 12px/1.5 var(--f-mono); color: var(--muted); background: var(--panel-2); padding: 10px; border-radius: 8px; overflow-x: auto; white-space: pre; margin: 0; }
+footer { color: var(--muted); font-size: 12px; text-align: center; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ===== Tema retro: Internet Explorer / Windows 98 ===== */
+:root {
+  --bg:#008080; --panel:#c0c0c0; --panel-2:#dfdfdf; --line:#808080;
+  --fg:#000; --muted:#404040; --amber:#000080; --amber-soft:rgba(0,0,128,.15);
+  --ok:#008000; --warn:#b8860b; --crit:#c00000; --info:#0000ff;
+  --f-display:Tahoma,"MS Sans Serif",Verdana,sans-serif; --f-body:Tahoma,"MS Sans Serif",Verdana,sans-serif;
+  --f-mono:"Courier New",Courier,monospace; color-scheme:light;
+}
+body{background:#008080 !important;color:#000;font:13px/1.4 var(--f-body);}
+.wrap{background:#c0c0c0;max-width:1240px;margin:16px auto;padding:0 0 12px;gap:10px;
+  border:2px solid;border-color:#fff #000 #000 #fff;box-shadow:inset -1px -1px #808080,inset 1px 1px #dfdfdf;}
+.wrap>*:not(.ie-chrome){margin-inline:10px;}
+.ie-title{background:linear-gradient(90deg,#000080,#1084d0);color:#fff;font-weight:700;padding:3px 4px 3px 6px;display:flex;justify-content:space-between;align-items:center}
+.ie-title b{display:flex;gap:6px;align-items:center}
+.ie-btns span{display:inline-block;width:18px;height:16px;margin-left:2px;background:#c0c0c0;color:#000;font:700 11px/14px Tahoma;text-align:center;border:1px solid;border-color:#fff #000 #000 #fff}
+.ie-menu{padding:3px 6px;display:flex;gap:14px;border-bottom:1px solid #808080}
+.ie-menu u{text-decoration:underline}
+.ie-addr{display:flex;align-items:center;gap:6px;padding:4px 6px;border-bottom:1px solid #808080}
+.ie-addr div{flex:1;background:#fff;border:2px solid;border-color:#808080 #fff #fff #808080;padding:2px 4px;font-family:var(--f-mono)}
+.ie-status{margin:0 !important;border-top:1px solid #808080;padding:2px 8px;display:flex;justify-content:space-between;font-size:12px}
+.ie-status span{border:1px solid;border-color:#808080 #fff #fff #808080;padding:0 8px}
+.brand h1{font:700 30px Tahoma;color:#000080;letter-spacing:0;font-style:italic;text-shadow:2px 2px #fff}
+.brand h1 span{color:#c00000}
+.card,.status,section>.card,.log,.cfg,.raw,details{background:#c0c0c0 !important;border:2px solid !important;border-color:#fff #000 #000 #fff !important;
+  border-radius:0 !important;box-shadow:inset -1px -1px #808080,inset 1px 1px #dfdfdf !important;}
+.card-head{background:linear-gradient(90deg,#000080,#1084d0);margin:-16px -16px 0;padding:3px 6px}
+.card-head .label{color:#fff;letter-spacing:0;text-transform:none;font-size:12px}
+.label{letter-spacing:0;color:#000080}
+.chip,.pill{border-radius:0 !important;background:#fff !important;color:#000 !important;border:2px solid !important;border-color:#808080 #fff #fff #808080 !important}
+button,input,select{border-radius:0 !important;background:#c0c0c0 !important;color:#000 !important;font:12px Tahoma !important;
+  border:2px solid !important;border-color:#fff #000 #000 #fff !important;box-shadow:inset -1px -1px #808080 !important}
+button:active{border-color:#000 #fff #fff #000 !important}
+input{background:#fff !important;border-color:#808080 #fff #fff #808080 !important}
+.value{color:#000}
+.chart,canvas{background:#000 !important;border:2px solid;border-color:#808080 #fff #fff #808080}
+.big{font-family:Tahoma;color:var(--s-color,#000)}
+@keyframes blink{50%{opacity:0}}
+.marquee{overflow:hidden;white-space:nowrap;background:#ffffe1;border:1px solid #000;padding:2px 0;color:#000080;font-weight:700}
+.marquee span{display:inline-block;padding-left:100%;animation:mq 30s linear infinite}
+@keyframes mq{to{transform:translateX(-100%)}}
+.new{color:#c00000;animation:blink 1s steps(1) infinite;font-weight:700}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="ie-chrome">
+    <div class="ie-title"><b>🌐 Cava de Fermentación - Microsoft Internet Explorer</b><span class="ie-btns"><span>_</span><span>□</span><span>×</span></span></div>
+    <div class="ie-menu"><span><u>A</u>rchivo</span><span><u>E</u>dición</span><span><u>V</u>er</span><span><u>F</u>avoritos</span><span><u>H</u>erramientas</span><span>Ay<u>u</u>da</span></div>
+    <div class="ie-addr">Dirección <div>http://www.cava-fermentacion.com.mx/equipo5/index.htm</div><button type="button">Ir</button></div>
+  </div>
+  <div class="marquee"><span>★ Equipo 5 IoT ★ Adrián Jesús Ventura Perdomo Lobo 220847239 ★ Diego Cortes Vilches 223992396 ★ Andrea Guadalupe Arellano Guerrero 219533921 ★ José Armando Sanchez Gonzalez 223992604 ★ Abraham Garcia Salazar 220564822 ★ Erick Landaverde Jacobo 323002116 ★</span></div>
+
+  <header>
+    <div class="brand">
+      <div class="label">Sprint 3 · ESP32 · MQTT</div>
+      <h1>Cava de <span>Fermentación</span></h1>
+    </div>
+    <div class="conn">
+      <span class="pill" id="connPill" data-s="off"><span class="dot"></span><span id="connText">Desconectado</span></span>
+      <span class="pill"><span class="mono" id="lastSeen">sin datos</span></span>
+      <button type="button" id="demoBtn">Modo demo</button>
+    </div>
+  </header>
+
+  <section class="status" id="statusBox" aria-live="polite">
+    <svg class="bubbles" viewBox="0 0 46 46" aria-hidden="true">
+      <circle cx="12" cy="30" r="5" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--s-color,var(--muted))"/>
+      <circle cx="28" cy="18" r="8" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--s-color,var(--muted))"/>
+      <circle cx="34" cy="36" r="3.5" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--s-color,var(--muted))"/>
+    </svg>
+    <div>
+      <div class="label">Estado general</div>
+      <div class="big" id="statusText">Esperando al ESP32</div>
+      <div class="why" id="statusWhy">Conectando al broker. Si no tienes el equipo encendido, prueba el modo demo.</div>
+      <div class="action"><span class="label">Acción sugerida</span><span id="statusAct">Esperar a que el ESP32 envíe datos.</span></div>
+    </div>
+    <div class="meta">
+      <div class="label">Mensajes recibidos</div>
+      <div class="mono" style="font-size:26px;font-weight:600" id="msgCount">0</div>
+    </div>
+  </section>
+
+  <section class="grid4">
+    <article class="card">
+      <div class="card-head"><span class="label">Temperatura · DHT11</span><span class="chip" id="tChip">—</span></div>
+      <svg class="gauge" id="tGauge" viewBox="0 0 200 120"></svg>
+      <div class="value mono" id="tVal">—<small>°C</small></div>
+      <div class="sub"><span>Rango 18–28 °C</span><span class="mono" id="tMinMax">mín — · máx —</span></div>
+    </article>
+
+    <article class="card">
+      <div class="card-head"><span class="label">Humedad · DHT11</span><span class="chip" id="hChip">—</span></div>
+      <svg class="gauge" id="hGauge" viewBox="0 0 200 120"></svg>
+      <div class="value mono" id="hVal">—<small>%HR</small></div>
+      <div class="sub"><span>Rango 25–85 %</span><span class="mono" id="hMinMax">mín — · máx —</span></div>
+    </article>
+
+    <article class="card">
+      <div class="card-head"><span class="label">Aire · MQ-135</span><span class="chip" id="mChip">—</span></div>
+      <div class="mqbar">
+        <div class="track"><div class="band" style="left:41%;width:18%"></div><div class="zero"></div><div class="needle" id="mNeedle"></div></div>
+        <div class="ticks"><span>−50%</span><span>−18</span><span>0</span><span>+18</span><span>+50%</span></div>
+      </div>
+      <div class="value mono" id="mVal">—<small>% vs ref.</small></div>
+      <div class="sub"><span>ADC filtrado</span><span class="mono" id="mAdc">—</span></div>
+    </article>
+
+    <article class="card">
+      <div class="card-head"><span class="label">Movimiento · PIR</span><span class="chip" id="pChip">—</span></div>
+      <div class="pir-viz" id="pViz" data-a="0"><span class="pir-ring"></span><span class="pir-ring"></span><span class="pir-ring"></span><span class="pir-core"></span></div>
+      <div class="value mono" id="pVal">0<small>eventos</small></div>
+      <div class="sub"><span>Último movimiento</span><span class="mono" id="pLast">—</span></div>
+    </article>
+  </section>
+
+  <section class="grid2">
+    <article class="card">
+      <div class="card-head"><span class="label">Temperatura y humedad · últimos 5 min</span>
+        <div class="legend"><span><i style="background:var(--amber)"></i>°C</span><span><i style="background:var(--info)"></i>%HR</span></div></div>
+      <canvas class="chart" id="cTH"></canvas>
+    </article>
+    <article class="card">
+      <div class="card-head"><span class="label">MQ-135 · variación vs referencia</span>
+        <div class="legend"><span><i style="background:var(--amber)"></i>% var</span><span><i style="background:rgba(143,191,90,.5)"></i>umbral ±18%</span></div></div>
+      <canvas class="chart" id="cMQ"></canvas>
+    </article>
+  </section>
+
+  <section class="bottom">
+    <article class="card">
+      <div class="card-head"><span class="label">Bitácora de eventos</span><button type="button" id="clearLog">Limpiar</button></div>
+      <ul class="log" id="log"><li class="empty">Aquí aparecen los cambios de estado, alertas y movimientos.</li></ul>
+    </article>
+    <article class="card">
+      <div class="card-head"><span class="label">Conexión</span></div>
+      <form class="cfg" id="cfg">
+        <label><span class="label">Broker (WebSocket)</span><input id="cfgUrl" value="wss://broker.hivemq.com:8884/mqtt"></label>
+        <label><span class="label">Tópico</span><input id="cfgTopic" value="agencia/cerveceria/sensores"></label>
+        <div class="row"><button type="submit">Conectar</button></div>
+      </form>
+      <div class="label">Último payload</div>
+      <pre class="raw" id="raw">—</pre>
+    </article>
+  </section>
+
+  <footer>Umbrales iguales a los del firmware: 18–28 °C · 25–85 %HR · MQ-135 ±18% durante 3 reportes.</footer>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const T = { tMin: 18, tMax: 28, hMin: 25, hMax: 85, mq: 18 };
+  const MAX_PTS = 150; // 150 × 2 s = 5 min
+
+  const hist = { t: [], temp: [], hum: [], mvar: [] };
+  let client = null, demoTimer = null, demo = false, msgCount = 0, lastAt = 0;
+  let prevEstado = null, prevPirEvents = null, lastMotionAt = null;
+  let tMin = Infinity, tMax = -Infinity, hMin = Infinity, hMax = -Infinity;
+
+  // ---------- Estados ----------
+  const ESTADOS = {
+    NORMAL:                 { k: 'ok',   c: '--ok',    txt: 'Todo en orden',          why: 'Temperatura, humedad y aire dentro de rango.',
+                              act: 'Ninguna. Seguir monitoreando la fermentación.' },
+    ACTIVIDAD_DETECTADA:    { k: 'info', c: '--info',  txt: 'Actividad en la zona',   why: 'El PIR detectó movimiento en los últimos 30 s.',
+                              act: 'Confirmar que quien entró a la cava esté autorizado y registrar la visita.' },
+    CAMBIO_EN_OBSERVACION:  { k: 'warn', c: '--warn',  txt: 'Cambio en el aire',      why: 'El MQ-135 se salió del umbral; se confirma tras 3 reportes.',
+                              act: 'Revisar la ventilación y los airlocks; puede ser fermentación activa liberando CO₂.' },
+    ALERTA_AMBIENTAL:       { k: 'crit', c: '--crit',  txt: 'Alerta ambiental',       why: 'Hay una variable fuera de rango. Revisa la cava.',
+                              act: 'Ventilar la cava y revisar la climatización y los tanques.' },
+    REVISAR_DHT11:          { k: 'warn', c: '--warn',  txt: 'Revisar DHT11',          why: 'El sensor no está entregando lecturas válidas.',
+                              act: 'Revisar el cableado del DHT11 (GPIO4) y su alimentación.' },
+    REVISAR_REFERENCIA_MQ135:{ k: 'warn', c: '--warn', txt: 'Revisar MQ-135',         why: 'No se obtuvo una referencia válida al calibrar.',
+                              act: 'Revisar el MQ-135 (GPIO34) y reiniciar el ESP32 con el aire limpio.' },
+    ESTABILIZACION_INICIAL: { k: 'info', c: '--amber', txt: 'Calentando sensores',    why: 'Primeros 15 s tras el arranque.',
+                              act: 'Esperar; no tocar ni mover los sensores.' },
+    CALIBRANDO_REFERENCIA:  { k: 'info', c: '--amber', txt: 'Calibrando MQ-135',      why: 'Midiendo el aire de referencia durante 15 s.',
+                              act: 'Mantener el aire limpio cerca del sensor mientras calibra.' },
+  };
+
+  // En alerta ambiental, explica qué variable falló y qué hacer con cada una.
+  function alertDetail(temp, hum, mvar) {
+    const why = [], act = [];
+    if (temp != null && temp > T.tMax) { why.push(`temperatura alta (${temp.toFixed(1)} °C)`); act.push('enfriar la cava; arriba de 28 °C la levadura produce sabores indeseados'); }
+    if (temp != null && temp < T.tMin) { why.push(`temperatura baja (${temp.toFixed(1)} °C)`); act.push('subir la temperatura; abajo de 18 °C la fermentación se frena'); }
+    if (hum != null && hum > T.hMax) { why.push(`humedad alta (${hum.toFixed(0)} %)`); act.push('deshumidificar para evitar moho'); }
+    if (hum != null && hum < T.hMin) { why.push(`humedad baja (${hum.toFixed(0)} %)`); act.push('revisar sellos y corchos, el aire seco los reseca'); }
+    if (mvar != null && Math.abs(mvar) >= T.mq) { why.push(`aire alterado (${mvar > 0 ? '+' : ''}${mvar.toFixed(0)} % en MQ-135)`); act.push('ventilar y revisar fugas de CO₂ antes de entrar'); }
+    if (!why.length) return null;
+    const cap = s => s[0].toUpperCase() + s.slice(1);
+    return { why: cap(why.join(', ')) + '.', act: cap(act.join('; ')) + '.' };
+  }
+
+  // ---------- Gauges ----------
+  function arc(cx, cy, r, a0, a1) {
+    const p = a => [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+    const [x0, y0] = p(a0), [x1, y1] = p(a1);
+    return `M${x0.toFixed(2)} ${y0.toFixed(2)} A${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+  }
+  function drawGauge(svg, v, lo, hi, okLo, okHi, color) {
+    const A0 = Math.PI, A1 = 2 * Math.PI, cx = 100, cy = 100, r = 78;
+    const ang = x => A0 + (Math.min(Math.max(x, lo), hi) - lo) / (hi - lo) * (A1 - A0);
+    const has = v != null && !isNaN(v);
+    const needle = has ? ang(v) : null;
+    const nx = has ? cx + (r - 4) * Math.cos(needle) : 0, ny = has ? cy + (r - 4) * Math.sin(needle) : 0;
+    svg.innerHTML = `
+      <path d="${arc(cx, cy, r, A0, A1)}" stroke="${css('--panel-2')}" stroke-width="16" fill="none" stroke-linecap="round"/>
+      <path d="${arc(cx, cy, r, ang(okLo), ang(okHi))}" stroke="rgba(143,191,90,.28)" stroke-width="16" fill="none"/>
+      ${has ? `<path d="${arc(cx, cy, r, A0, needle + 0.0001)}" stroke="${color}" stroke-width="5" fill="none" stroke-linecap="round"/>
+      <circle cx="${nx.toFixed(1)}" cy="${ny.toFixed(1)}" r="7" fill="${color}" stroke="${css('--panel')}" stroke-width="3"/>` : ''}
+      <text x="22" y="117" fill="${css('--muted')}" font-size="11" text-anchor="middle">${lo}</text>
+      <text x="178" y="117" fill="${css('--muted')}" font-size="11" text-anchor="middle">${hi}</text>`;
+  }
+
+  // ---------- Gráficas (canvas) ----------
+  function setupCanvas(cv) {
+    const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+    if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+    return { ctx, w, h };
+  }
+  function line(ctx, pts, color, fill, baseY) {
+    const v = pts.filter(p => p[1] != null);
+    if (v.length < 2) return;
+    ctx.beginPath(); v.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.stroke();
+    if (fill) {
+      ctx.lineTo(v[v.length - 1][0], baseY); ctx.lineTo(v[0][0], baseY); ctx.closePath();
+      const g = ctx.createLinearGradient(0, 0, 0, baseY); g.addColorStop(0, fill); g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.fill();
+    }
+    const [lx, ly] = v[v.length - 1];
+    ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+  }
+  function drawTH() {
+    const { ctx, w, h } = setupCanvas($('cTH'));
+    const L = 34, R = 38, Tp = 10, B = 22, pw = w - L - R, ph = h - Tp - B;
+    const tLo = 10, tHi = 40, hLo = 0, hHi = 100, n = MAX_PTS;
+    const X = i => L + (i + (n - hist.t.length)) / (n - 1) * pw;
+    const Yt = v => Tp + (1 - (v - tLo) / (tHi - tLo)) * ph;
+    const Yh = v => Tp + (1 - (v - hLo) / (hHi - hLo)) * ph;
+    ctx.fillStyle = 'rgba(143,191,90,.08)'; ctx.fillRect(L, Yt(T.tMax), pw, Yt(T.tMin) - Yt(T.tMax));
+    ctx.font = '11px ' + css('--f-mono'); ctx.textBaseline = 'middle';
+    [10, 18, 28, 40].forEach(v => {
+      ctx.strokeStyle = css('--line'); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(L, Yt(v)); ctx.lineTo(w - R, Yt(v)); ctx.stroke();
+      ctx.fillStyle = css('--amber'); ctx.textAlign = 'right'; ctx.fillText(v + '°', L - 6, Yt(v));
+    });
+    [0, 50, 100].forEach(v => { ctx.fillStyle = css('--info'); ctx.textAlign = 'left'; ctx.fillText(v + '%', w - R + 6, Yh(v)); });
+    ctx.fillStyle = css('--muted'); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText('−5 min', L, h - 4); ctx.textAlign = 'right'; ctx.fillText('ahora', w - R, h - 4);
+    line(ctx, hist.hum.map((v, i) => [X(i), v == null ? null : Yh(v)]), css('--info'), 'rgba(108,180,217,.16)', Tp + ph);
+    line(ctx, hist.temp.map((v, i) => [X(i), v == null ? null : Yt(v)]), css('--amber'), 'rgba(242,163,58,.22)', Tp + ph);
+  }
+  function drawMQ() {
+    const { ctx, w, h } = setupCanvas($('cMQ'));
+    const L = 40, R = 12, Tp = 10, B = 22, pw = w - L - R, ph = h - Tp - B, n = MAX_PTS;
+    const vals = hist.mvar.filter(v => v != null);
+    const lim = Math.max(30, Math.ceil(Math.max(0, ...vals.map(Math.abs)) / 10) * 10 + 5);
+    const X = i => L + (i + (n - hist.t.length)) / (n - 1) * pw;
+    const Y = v => Tp + (1 - (v + lim) / (2 * lim)) * ph;
+    ctx.fillStyle = 'rgba(143,191,90,.10)'; ctx.fillRect(L, Y(T.mq), pw, Y(-T.mq) - Y(T.mq));
+    ctx.font = '11px ' + css('--f-mono'); ctx.textBaseline = 'middle';
+    [-lim, -T.mq, 0, T.mq, lim].forEach(v => {
+      ctx.strokeStyle = v === 0 ? css('--muted') : css('--line'); ctx.lineWidth = 1;
+      ctx.setLineDash(Math.abs(v) === T.mq ? [4, 4] : []); ctx.beginPath(); ctx.moveTo(L, Y(v)); ctx.lineTo(w - R, Y(v)); ctx.stroke();
+      ctx.fillStyle = css('--muted'); ctx.textAlign = 'right'; ctx.fillText((v > 0 ? '+' : '') + v, L - 6, Y(v));
+    });
+    ctx.setLineDash([]); ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left'; ctx.fillText('−5 min', L, h - 4);
+    ctx.textAlign = 'right'; ctx.fillText('ahora', w - R, h - 4);
+    line(ctx, hist.mvar.map((v, i) => [X(i), v == null ? null : Y(v)]), css('--amber'), null, 0);
+  }
+
+  // ---------- UI ----------
+  const fmtTime = d => d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  function chip(id, k, txt) { const el = $(id); el.dataset.k = k; el.textContent = txt; }
+  function log(msg) {
+    const ul = $('log'); const e = ul.querySelector('.empty'); if (e) e.remove();
+    const li = document.createElement('li');
+    li.innerHTML = `<time>${fmtTime(new Date())}</time><span></span>`; li.lastChild.textContent = msg;
+    ul.prepend(li); while (ul.children.length > 80) ul.lastChild.remove();
+  }
+  function setConn(s, txt) { $('connPill').dataset.s = s; $('connText').textContent = txt; }
+
+  function render(d) {
+    const temp = typeof d.temp === 'number' ? d.temp : null;
+    const hum = typeof d.humedad === 'number' ? d.humedad : null;
+    const mvar = typeof d.mq_var_pct === 'number' ? d.mq_var_pct : null;
+
+    // Historial
+    hist.t.push(Date.now()); hist.temp.push(temp); hist.hum.push(hum); hist.mvar.push(mvar);
+    if (hist.t.length > MAX_PTS) Object.values(hist).forEach(a => a.shift());
+
+    // Temperatura
+    if (temp != null) { tMin = Math.min(tMin, temp); tMax = Math.max(tMax, temp); }
+    const tK = temp == null ? 'warn' : temp < T.tMin ? 'info' : temp > T.tMax ? 'crit' : 'ok';
+    chip('tChip', tK, temp == null ? 'Sin lectura' : temp < T.tMin ? 'Baja' : temp > T.tMax ? 'Alta' : 'En rango');
+    $('tVal').innerHTML = (temp == null ? '—' : temp.toFixed(1)) + '<small>°C</small>';
+    $('tMinMax').textContent = isFinite(tMin) ? `mín ${tMin.toFixed(1)} · máx ${tMax.toFixed(1)}` : 'mín — · máx —';
+    drawGauge($('tGauge'), temp, 10, 40, T.tMin, T.tMax, css(tK === 'ok' ? '--amber' : tK === 'crit' ? '--crit' : '--info'));
+
+    // Humedad
+    if (hum != null) { hMin = Math.min(hMin, hum); hMax = Math.max(hMax, hum); }
+    const hK = hum == null ? 'warn' : (hum < T.hMin || hum > T.hMax) ? 'crit' : 'ok';
+    chip('hChip', hK, hum == null ? 'Sin lectura' : hum < T.hMin ? 'Baja' : hum > T.hMax ? 'Alta' : 'En rango');
+    $('hVal').innerHTML = (hum == null ? '—' : hum.toFixed(0)) + '<small>%HR</small>';
+    $('hMinMax').textContent = isFinite(hMin) ? `mín ${hMin.toFixed(0)} · máx ${hMax.toFixed(0)}` : 'mín — · máx —';
+    drawGauge($('hGauge'), hum, 0, 100, T.hMin, T.hMax, css(hK === 'ok' ? '--info' : '--crit'));
+
+    // MQ-135
+    const est = d.estado || '';
+    const mK = mvar == null ? 'info' : est === 'ALERTA_AMBIENTAL' && Math.abs(mvar) >= T.mq ? 'crit' : Math.abs(mvar) >= T.mq ? 'warn' : 'ok';
+    chip('mChip', mK, mvar == null ? 'Sin referencia' : mK === 'crit' ? 'Alerta' : mK === 'warn' ? 'Cambio' : 'Estable');
+    $('mVal').innerHTML = (mvar == null ? '—' : (mvar > 0 ? '+' : '') + mvar.toFixed(1)) + '<small>% vs ref.</small>';
+    $('mAdc').textContent = typeof d.mq_adc === 'number' ? d.mq_adc.toFixed(0) + ' / 4095' : '—';
+    $('mNeedle').style.left = (50 + Math.max(-50, Math.min(50, mvar ?? 0))) + '%';
+    $('mNeedle').style.background = css(mK === 'crit' ? '--crit' : mK === 'warn' ? '--warn' : '--amber');
+
+    // PIR
+    const pirOn = !!d.pir_activo, ev = Number(d.pir_eventos) || 0;
+    if (prevPirEvents != null && ev > prevPirEvents) { lastMotionAt = new Date(); log(`Movimiento detectado (evento #${ev})`); }
+    prevPirEvents = ev;
+    $('pViz').dataset.a = pirOn ? '1' : '0';
+    chip('pChip', pirOn ? 'warn' : 'ok', pirOn ? 'Activo' : est === 'ESTABILIZACION_INICIAL' || est === 'CALIBRANDO_REFERENCIA' ? 'Estabilizando' : 'Quieto');
+    $('pVal').innerHTML = ev + '<small>eventos</small>';
+    $('pLast').textContent = lastMotionAt ? fmtTime(lastMotionAt) : '—';
+
+    // Estado general
+    const e = ESTADOS[est] || { k: 'info', c: '--muted', txt: est || 'Desconocido', why: 'Estado reportado por el ESP32.' };
+    $('statusBox').style.setProperty('--s-color', css(e.c));
+    const det = est === 'ALERTA_AMBIENTAL' ? alertDetail(temp, hum, mvar) : null;
+    $('statusText').textContent = e.txt;
+    $('statusWhy').textContent = det ? det.why : e.why;
+    $('statusAct').textContent = det ? det.act : (e.act || 'Revisar el equipo.');
+    if (est !== prevEstado) { log(`Estado: ${e.txt}`); prevEstado = est; }
+
+    msgCount++; lastAt = Date.now(); $('msgCount').textContent = msgCount;
+    $('raw').textContent = JSON.stringify(d, null, 2);
+    drawTH(); drawMQ();
+  }
+
+  // ---------- MQTT ----------
+  function connect() {
+    stopDemo();
+    if (client) { try { client.end(true); } catch {} client = null; }
+    const url = $('cfgUrl').value.trim(), topic = $('cfgTopic').value.trim();
+    try { localStorage.setItem('cava-cfg-v3', JSON.stringify({ url, topic })); } catch {}
+    if (typeof mqtt === 'undefined') { setConn('off', 'No cargó la librería MQTT'); return; }
+    setConn('off', 'Conectando…');
+    client = mqtt.connect(url, { clientId: 'cava-web-' + Math.random().toString(16).slice(2, 8), reconnectPeriod: 4000, connectTimeout: 8000 });
+    client.on('connect', () => { setConn('on', 'En vivo · ' + new URL(url).hostname); client.subscribe(topic); log('Conectado al broker'); });
+    client.on('reconnect', () => { if (!demo) setConn('off', 'Reconectando…'); });
+    client.on('close', () => { if (!demo) setConn('off', 'Desconectado'); });
+    client.on('error', err => { if (!demo) setConn('off', 'Error: ' + err.message); });
+    client.on('message', (_t, buf) => {
+      if (demo) return;
+      try { render(JSON.parse(buf.toString())); } catch (e) { log('Payload no es JSON válido'); }
+    });
+  }
+
+  // ---------- Demo ----------
+  let sim = { t: 22.4, h: 56, v: 0, ev: 0, k: 0, alertN: 0 };
+  function demoTick() {
+    sim.k++;
+    sim.t += (Math.random() - 0.5) * 0.35 + (sim.k % 120 > 80 ? 0.12 : -0.02);
+    sim.t = Math.max(15, Math.min(32, sim.t));
+    sim.h += (Math.random() - 0.5) * 1.2; sim.h = Math.max(30, Math.min(80, sim.h));
+    const burst = sim.k % 90 > 60 && sim.k % 90 < 75;
+    sim.v += ((burst ? 26 : 0) - sim.v) * 0.25 + (Math.random() - 0.5) * 2.5;
+    const pir = Math.random() < 0.06; if (pir) sim.ev++;
+    const sig = Math.abs(sim.v) >= T.mq; sim.alertN = sig ? sim.alertN + 1 : 0;
+    const tA = sim.t < T.tMin || sim.t > T.tMax;
+    const estado = sim.k < 4 ? 'CALIBRANDO_REFERENCIA' : (sim.alertN >= 3 || tA) ? 'ALERTA_AMBIENTAL' : sig ? 'CAMBIO_EN_OBSERVACION' : pir ? 'ACTIVIDAD_DETECTADA' : 'NORMAL';
+    render({ temp: +sim.t.toFixed(1), humedad: +sim.h.toFixed(1), mq_adc: +(1450 * (1 + sim.v / 100)).toFixed(1),
+             mq_var_pct: sim.k < 4 ? null : +sim.v.toFixed(1), pir_activo: pir, pir_eventos: sim.ev, estado });
+  }
+  function startDemo() {
+    demo = true; setConn('demo', 'Modo demo · datos simulados'); $('demoBtn').textContent = 'Salir de demo';
+    log('Modo demo activado'); for (let i = 0; i < 60; i++) demoTick(); demoTimer = setInterval(demoTick, 2000);
+  }
+  function stopDemo() {
+    if (!demo) return; demo = false; clearInterval(demoTimer); $('demoBtn').textContent = 'Modo demo';
+    Object.values(hist).forEach(a => a.length = 0); msgCount = 0; prevPirEvents = null; prevEstado = null;
+    tMin = hMin = Infinity; tMax = hMax = -Infinity;
+    log('Modo demo desactivado'); setConn(client && client.connected ? 'on' : 'off', client && client.connected ? 'En vivo' : 'Esperando datos');
+  }
+
+  // ---------- Eventos ----------
+  $('demoBtn').addEventListener('click', () => demo ? stopDemo() : startDemo());
+  $('cfg').addEventListener('submit', e => { e.preventDefault(); connect(); });
+  $('clearLog').addEventListener('click', () => { $('log').innerHTML = '<li class="empty">Bitácora vacía.</li>'; });
+  window.addEventListener('resize', () => { drawTH(); drawMQ(); });
+  setInterval(() => {
+    if (!lastAt) return;
+    const s = Math.round((Date.now() - lastAt) / 1000);
+    $('lastSeen').textContent = s < 3 ? 'actualizado ahora' : `hace ${s} s`;
+    if (!demo && s > 10 && client && client.connected) setConn('off', 'Broker OK · ESP32 sin enviar');
+  }, 1000);
+
+  try { const c = JSON.parse(localStorage.getItem('cava-cfg-v3') || 'null'); if (c) { $('cfgUrl').value = c.url; $('cfgTopic').value = c.topic; } } catch {}
+  drawGauge($('tGauge'), null, 10, 40, T.tMin, T.tMax, css('--amber'));
+  drawGauge($('hGauge'), null, 0, 100, T.hMin, T.hMax, css('--info'));
+  drawTH(); drawMQ();
+  connect();
+  // Si en 6 s no llega nada del ESP32, arranca la demo para que el tablero no se vea vacío.
+  setTimeout(() => { if (!msgCount && !demo) startDemo(); }, 6000);
+})();
+</script>
+</body>
+</html>
